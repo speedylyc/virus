@@ -1,0 +1,653 @@
+﻿<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>服务器病毒扫描管理系统</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css" rel="stylesheet">
+    <style>
+        body { background: #f0f2f5; padding: 15px; }
+        .card { box-shadow: 0 1px 3px rgba(0,0,0,0.1); margin-bottom: 15px; }
+        .card-header { font-weight: 600; background: #f8f9fa; }
+        .log-area { background: #1e1e1e; color: #d4d4d4; font-family: Consolas, monospace;
+                    font-size: 12px; padding: 10px; border-radius: 4px; height: 300px;
+                    overflow-y: auto; white-space: pre-wrap; }
+        .log-error { color: #f48771; } .log-success { color: #6a9955; } .log-info { color: #569cd6; }
+        .table th { white-space: nowrap; background: #f8f9fa; }
+        .table td { vertical-align: middle; font-size: 13px; }
+        .progress { height: 20px; }
+        .tab-content { padding-top: 15px; }
+        .badge-virus { background: #dc3545; } .badge-ok { background: #198754; }
+        .checkbox-cell { width: 40px; text-align: center; }
+        .history-item { border-left: 3px solid #dee2e6; padding: 10px 15px; margin-bottom: 10px; background: #fff; border-radius: 0 4px 4px 0; }
+        .history-item.has-virus { border-left-color: #dc3545; }
+        .history-item.clean { border-left-color: #198754; }
+        .selected-servers-tag { display: inline-block; background: #cfe2ff; border: 1px solid #9ec5fe;
+                                border-radius: 4px; padding: 2px 8px; margin: 2px; font-size: 12px; }
+    </style>
+</head>
+<body>
+<div class="container-fluid">
+    <h3 class="mb-3"><i class="bi bi-shield-check"></i> 服务器病毒扫描管理系统</h3>
+
+    <ul class="nav nav-tabs" id="mainTab" role="tablist">
+        <li class="nav-item"><button class="nav-link active" data-bs-toggle="tab" data-bs-target="#scan"><i class="bi bi-radar"></i> 扫描控制</button></li>
+        <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#virus"><i class="bi bi-bug"></i> 病毒处理</button></li>
+        <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#whitelist"><i class="bi bi-check2-circle"></i> 白名单</button></li>
+        <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#history"><i class="bi bi-clock-history"></i> 历史记录</button></li>
+        <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#schedule"><i class="bi bi-calendar-clock"></i> 定时任务</button></li>
+        <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#servers"><i class="bi bi-hdd-network"></i> 服务器配置</button></li>
+        <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#clamav"><i class="bi bi-shield"></i> ClamAV管理</button></li>
+    </ul>
+
+    <div class="tab-content pt-3">
+        <!-- ========== 扫描控制 ========== -->
+        <div class="tab-pane fade show active" id="scan">
+            <div class="card">
+                <div class="card-header"><i class="bi bi-server"></i> 主控服务器配置
+                    <div class="float-end">
+                        <button class="btn btn-outline-success btn-sm" onclick="saveMasterConfig()"><i class="bi bi-save"></i> 保存配置</button>
+                        <button class="btn btn-primary btn-sm" onclick="testMaster()"><i class="bi bi-plug"></i> 测试连接</button>
+                    </div>
+                </div>
+                <div class="card-body">
+                    <div class="row g-3">
+                        <div class="col-md-2"><label class="form-label">IP地址</label><input type="text" class="form-control form-control-sm" id="m_ip"></div>
+                        <div class="col-md-1"><label class="form-label">端口</label><input type="number" class="form-control form-control-sm" id="m_port"></div>
+                        <div class="col-md-2"><label class="form-label">用户名</label><input type="text" class="form-control form-control-sm" id="m_user"></div>
+                        <div class="col-md-2"><label class="form-label">密码</label><input type="password" class="form-control form-control-sm" id="m_password"></div>
+                        <div class="col-md-3"><label class="form-label">Ansible路径</label><input type="text" class="form-control form-control-sm" id="m_ansible"></div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="card">
+                <div class="card-header"><i class="bi bi-check2-square"></i> 选择扫描服务器</div>
+                <div class="card-body">
+                    <div class="d-flex align-items-center gap-3 mb-3">
+                        <button class="btn btn-primary" data-bs-toggle="modal" data-bs-target="#serverSelectModal"><i class="bi bi-gear-wide-connected"></i> 选择服务器</button>
+                        <span class="text-muted">已选 <strong id="selected_count_text">0</strong> 台</span>
+                        <button class="btn btn-outline-secondary btn-sm" onclick="selectAllDefault()"><i class="bi bi-check-all"></i> 全选</button>
+                    </div>
+                    <div id="selected_servers_tags" class="d-flex flex-wrap"></div>
+                </div>
+            </div>
+
+            <div class="card"><div class="card-body">
+                <div class="d-flex align-items-center gap-3">
+                    <button class="btn btn-danger" onclick="runScan()" id="btn_scan"><i class="bi bi-play-circle"></i> 执行扫描</button>
+                    <div class="progress flex-grow-1" style="height: 20px;"><div class="progress-bar" id="scan_progress" style="width: 0%">0%</div></div>
+                    <span id="scan_status" class="text-muted">就绪</span>
+                </div>
+            </div></div>
+
+            <div class="card"><div class="card-header"><i class="bi bi-table"></i> 扫描结果汇总</div><div class="card-body">
+                <div class="table-responsive"><table class="table table-striped table-sm" id="scan_result_table">
+                    <thead><tr><th>服务器</th><th>IP地址</th><th>报告文件</th><th>病毒数量</th></tr></thead><tbody></tbody>
+                </table></div>
+            </div></div>
+
+            <div class="card"><div class="card-header"><i class="bi bi-terminal"></i> 执行日志</div><div class="card-body">
+                <div class="log-area" id="scan_log"></div>
+            </div></div>
+        </div>
+
+        <!-- ========== 病毒处理 ========== -->
+        <div class="tab-pane fade" id="virus">
+            <div class="card"><div class="card-header"><i class="bi bi-tools"></i> 病毒处理</div><div class="card-body">
+                <div class="d-flex gap-2 mb-3 flex-wrap align-items-center">
+                    <button class="btn btn-primary" onclick="collectVirus()" id="btn_collect" disabled><i class="bi bi-collection"></i> 1. 收集病毒文件</button>
+                    <button class="btn btn-warning" onclick="markWhitelist()" id="btn_wl" disabled><i class="bi bi-check2-circle"></i> 2. 标记为误报</button>
+                    <button class="btn btn-danger" onclick="deleteVirus()" id="btn_delete" disabled><i class="bi bi-trash"></i> 3. 删除选中文件</button>
+                    <div class="progress" style="width: 300px;"><div class="progress-bar" id="virus_progress" style="width: 0%">0%</div></div>
+                    <span id="virus_count_label" class="text-muted"></span>
+                </div>
+            </div></div>
+
+            <div class="card"><div class="card-header"><i class="bi bi-list-ul"></i> 病毒文件列表
+                <div class="float-end"><input type="checkbox" id="select_all_virus" onchange="toggleSelectAllVirus()"> 全选</div>
+            </div><div class="card-body">
+                <div class="table-responsive" style="max-height: 500px; overflow-y: auto;">
+                    <table class="table table-hover table-sm" id="virus_table">
+                        <thead style="position: sticky; top: 0;"><tr><th class="checkbox-col"></th><th>服务器</th><th>文件路径</th><th>病毒名称</th><th>大小</th><th>状态</th></tr></thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </div></div>
+
+            <div class="card"><div class="card-header"><i class="bi bi-terminal"></i> 处理日志</div><div class="card-body">
+                <div class="log-area" id="virus_log"></div>
+            </div></div>
+        </div>
+
+        <!-- ========== 白名单 ========== -->
+        <div class="tab-pane fade" id="whitelist">
+            <div class="card"><div class="card-header"><i class="bi bi-check2-circle"></i> 误报白名单
+                <div class="float-end"><button class="btn btn-outline-primary btn-sm" onclick="loadWhitelist()"><i class="bi bi-arrow-clockwise"></i> 刷新</button></div>
+            </div><div class="card-body">
+                <div class="alert alert-info"><small><i class="bi bi-info-circle"></i> 白名单中的文件路径或病毒名，下次扫描时会自动过滤。</small></div>
+                <div class="table-responsive"><table class="table table-striped table-sm" id="whitelist_table">
+                    <thead><tr><th>类型</th><th>匹配规则</th><th>添加时间</th><th>操作</th></tr></thead><tbody></tbody>
+                </table></div>
+            </div></div>
+        </div>
+
+        <!-- ========== 历史记录 ========== -->
+        <div class="tab-pane fade" id="history">
+            <div class="card"><div class="card-header"><i class="bi bi-clock-history"></i> 扫描历史记录
+                <div class="float-end"><button class="btn btn-outline-primary btn-sm" onclick="loadHistory()"><i class="bi bi-arrow-clockwise"></i> 刷新</button></div>
+            </div><div class="card-body" id="history_list"></div></div>
+        </div>
+
+        <!-- ========== 定时任务 ========== -->
+        <div class="tab-pane fade" id="schedule">
+            <div class="card"><div class="card-header"><i class="bi bi-calendar-clock"></i> 定时扫描配置</div><div class="card-body">
+                <div class="mb-3 form-check form-switch">
+                    <input class="form-check-input" type="checkbox" id="sched_enabled">
+                    <label class="form-check-label">启用定时扫描</label>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">扫描时间（Cron表达式）</label>
+                    <input type="text" class="form-control" id="sched_cron" style="max-width: 300px;">
+                    <div class="form-text">分 时 日 月 周，例如 <code>0 9 * * 1</code> 每周一9点，<code>0 2 * * *</code> 每天凌晨2点</div>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">企业微信 Webhook 地址</label>
+                    <input type="text" class="form-control" id="sched_webhook">
+                </div>
+                <div class="d-flex gap-2">
+                    <button class="btn btn-primary" onclick="saveSchedule()"><i class="bi bi-save"></i> 保存配置</button>
+                    <button class="btn btn-outline-success" onclick="testPush()"><i class="bi bi-send"></i> 发送测试推送</button>
+                </div>
+            </div></div>
+        </div>
+
+        <!-- ========== 服务器配置 ========== -->
+        <div class="tab-pane fade" id="servers">
+            <div class="card"><div class="card-header"><i class="bi bi-gear"></i> 服务器认证配置
+                <div class="float-end">
+                    <button class="btn btn-outline-primary btn-sm" onclick="reloadConfig()"><i class="bi bi-arrow-clockwise"></i> 重新加载</button>
+                    <button class="btn btn-outline-success btn-sm" onclick="saveConfig()"><i class="bi bi-save"></i> 保存配置</button>
+                    <button class="btn btn-outline-warning btn-sm" onclick="openConnTestModal()"><i class="bi bi-wifi"></i> 测试连通性</button>
+                </div>
+            </div><div class="card-body">
+                <div class="table-responsive"><table class="table table-striped table-sm" id="server_table">
+                    <thead><tr><th>服务器</th><th>IP地址</th><th>用户名</th><th>端口</th><th>认证方式</th><th>连通性</th></tr></thead><tbody></tbody>
+                </table></div>
+            </div></div>
+            <div class="card"><div class="card-header"><i class="bi bi-terminal"></i> 连通性测试日志</div><div class="card-body">
+                <div class="log-area" id="conn_log"></div>
+            </div></div>
+        </div>
+
+        <!-- ========== ClamAV管理 ========== -->
+        <div class="tab-pane fade" id="clamav">
+            <div class="card"><div class="card-header"><i class="bi bi-shield"></i> ClamAV 病毒库管理</div><div class="card-body">
+                <div class="alert alert-info"><small><i class="bi bi-info-circle"></i> 可以选择主控或任意业务服务器，检查ClamAV版本和病毒库更新状态。</small></div>
+                <div class="row g-3 mb-3">
+                    <div class="col-md-4">
+                        <label class="form-label">选择目标服务器</label>
+                        <select class="form-select form-select-sm" id="clamav_target">
+                            <option value="">主控136</option>
+                        </select>
+                    </div>
+                    <div class="col-md-8 d-flex align-items-end gap-2">
+                        <button class="btn btn-primary btn-sm" onclick="checkClamav()"><i class="bi bi-search"></i> 检查状态</button>
+                        <button class="btn btn-warning btn-sm" onclick="updateClamav()"><i class="bi bi-arrow-repeat"></i> 更新病毒库</button>
+                    </div>
+                </div>
+                <div id="clamav_info" style="display:none;" class="alert alert-warning">
+                    <h6>当前状态</h6>
+                    <table class="table table-sm mb-0">
+                        <tr><td style="width:150px">检查目标:</td><td id="ci_target">-</td></tr>
+                        <tr><td>ClamAV 版本:</td><td id="ci_version">-</td></tr>
+                        <tr><td>病毒库更新日期:</td><td id="ci_date">-</td></tr>
+                        <tr><td>病毒库文件:</td><td><pre id="ci_files" class="mb-0" style="font-size:12px;"></pre></td></tr>
+                    </table>
+                </div>
+            </div></div>
+            <div class="card"><div class="card-header"><i class="bi bi-terminal"></i> 操作日志</div><div class="card-body">
+                <div class="log-area" id="clamav_log"></div>
+            </div></div>
+        </div>
+    </div>
+</div>
+
+<!-- ========== 服务器选择弹窗（通用） ========== -->
+<div class="modal fade" id="serverSelectModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-gear-wide-connected"></i> 选择服务器</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="mb-3 d-flex gap-2 align-items-center">
+            <button class="btn btn-sm btn-outline-primary" onclick="modalSelectAll(true)"><i class="bi bi-check-all"></i> 全选</button>
+            <button class="btn btn-sm btn-outline-secondary" onclick="modalSelectAll(false)"><i class="bi bi-x-square"></i> 全不选</button>
+            <input type="text" class="form-control form-control-sm ms-auto" id="server_search" placeholder="搜索IP/服务器名..." style="max-width: 250px;" oninput="filterServerList()">
+        </div>
+        <div style="max-height: 400px; overflow-y: auto; border: 1px solid #dee2e6; border-radius: 4px; padding: 10px;">
+            <div id="server_modal_list"></div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+        <button type="button" class="btn btn-primary" onclick="confirmServerSelect()"><i class="bi bi-check-lg"></i> 确认选择</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ========== 连通性测试选择弹窗 ========== -->
+<div class="modal fade" id="connTestModal" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-lg">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title"><i class="bi bi-wifi"></i> 选择要测试连通性的服务器</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+      </div>
+      <div class="modal-body">
+        <div class="mb-3 d-flex gap-2 align-items-center">
+            <button class="btn btn-sm btn-outline-primary" onclick="connSelectAll(true)"><i class="bi bi-check-all"></i> 全选</button>
+            <button class="btn btn-sm btn-outline-secondary" onclick="connSelectAll(false)"><i class="bi bi-x-square"></i> 全不选</button>
+            <input type="text" class="form-control form-control-sm ms-auto" id="conn_search" placeholder="搜索IP/服务器名..." style="max-width: 250px;" oninput="filterConnList()">
+        </div>
+        <div style="max-height: 400px; overflow-y: auto; border: 1px solid #dee2e6; border-radius: 4px; padding: 10px;">
+            <div id="conn_modal_list"></div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+        <button type="button" class="btn btn-primary" onclick="runConnTest()"><i class="bi bi-play"></i> 开始测试</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+let pollTimer = null;
+let allServers = [];
+let selectedServers = [];  // 扫描用
+let connTestServers = [];  // 连通性测试用
+
+function addLog(logId, msg, level) {
+    level = level || 'info';
+    const el = document.getElementById(logId);
+    const time = new Date().toLocaleTimeString();
+    el.innerHTML += `<span class="log-${level}">[${time}] ${escapeHtml(msg)}</span>\n`;
+    el.scrollTop = el.scrollHeight;
+}
+function escapeHtml(text) { const d = document.createElement('div'); d.textContent = text; return d.innerHTML; }
+function setProgress(barId, val, total) {
+    const pct = total > 0 ? Math.round(val / total * 100) : 0;
+    const bar = document.getElementById(barId);
+    bar.style.width = pct + '%';
+    bar.textContent = pct + '% (' + val + '/' + total + ')';
+}
+function startPolling(taskId, logId, barId, onDone) {
+    let logsLoaded = 0;
+    pollTimer = setInterval(async () => {
+        try {
+            const resp = await fetch('/api/task/' + taskId);
+            const task = await resp.json();
+            if (task.logs && task.logs.length > logsLoaded) {
+                for (let i = logsLoaded; i < task.logs.length; i++) {
+                    const l = task.logs[i];
+                    addLog(logId, `[${l.time}] ${l.message}`, l.level);
+                }
+                logsLoaded = task.logs.length;
+            }
+            if (barId) setProgress(barId, task.progress || 0, task.total || 100);
+            if (task.status === 'finished') { clearInterval(pollTimer); if (onDone) onDone(task.result); }
+        } catch (e) { console.error('轮询错误:', e); }
+    }, 800);
+}
+
+// ========== 主控配置 ==========
+async function loadMasterConfig() {
+    const resp = await fetch('/api/config/servers');
+    const data = await resp.json();
+    const m = data.master;
+    document.getElementById('m_ip').value = m.ip || '';
+    document.getElementById('m_port').value = m.port || 22;
+    document.getElementById('m_user').value = m.user || 'root';
+    document.getElementById('m_password').value = m.password || '';
+    document.getElementById('m_ansible').value = m.ansible_path || '/home/ansible';
+}
+async function saveMasterConfig() {
+    const data = {
+        ip: document.getElementById('m_ip').value, port: document.getElementById('m_port').value,
+        user: document.getElementById('m_user').value, password: document.getElementById('m_password').value,
+        ansible_path: document.getElementById('m_ansible').value
+    };
+    await fetch('/api/config/master', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(data) });
+    await fetch('/api/config/save', {method:'POST'});
+    alert('主控配置已保存');
+}
+
+// ========== 服务器选择弹窗（扫描用） ==========
+async function loadServerList() {
+    const resp = await fetch('/api/config/servers');
+    const data = await resp.json();
+    allServers = data.servers;
+    const saved = localStorage.getItem('selected_servers');
+    if (saved) { try { selectedServers = JSON.parse(saved); } catch(e) { selectedServers = allServers.map(s=>s.name); } }
+    else { selectedServers = allServers.map(s=>s.name); }
+    renderSelectedTags();
+    renderModalList();
+    // 填充ClamAV目标选择下拉
+    const sel = document.getElementById('clamav_target');
+    allServers.forEach(s => {
+        const opt = document.createElement('option');
+        opt.value = s.name; opt.textContent = `${s.name} (${s.ip})`;
+        sel.appendChild(opt);
+    });
+}
+function renderSelectedTags() {
+    const box = document.getElementById('selected_servers_tags');
+    document.getElementById('selected_count_text').textContent = selectedServers.length;
+    if (selectedServers.length === 0 || selectedServers.length === allServers.length) {
+        box.innerHTML = '<span class="text-muted">未选择服务器（默认全量扫描）</span>'; return;
+    }
+    box.innerHTML = '';
+    selectedServers.forEach(name => {
+        const s = allServers.find(x=>x.name===name);
+        const tag = document.createElement('span');
+        tag.className = 'selected-servers-tag';
+        tag.innerHTML = `${name} <small class="text-muted">(${s?s.ip:''})</small>`;
+        box.appendChild(tag);
+    });
+}
+function renderModalList() {
+    const box = document.getElementById('server_modal_list');
+    box.innerHTML = '';
+    allServers.forEach(s => {
+        const checked = selectedServers.includes(s.name) ? 'checked' : '';
+        const div = document.createElement('div');
+        div.className = 'form-check'; div.dataset.serverName = s.name;
+        div.innerHTML = `<input class="form-check-input server-modal-checkbox" type="checkbox" id="mc_${s.name}" value="${s.name}" ${checked}>
+            <label class="form-check-label" for="mc_${s.name}"><strong>${s.name}</strong> <small class="text-muted">${s.ip}</small></label>`;
+        box.appendChild(div);
+    });
+}
+function modalSelectAll(checked) { document.querySelectorAll('.server-modal-checkbox').forEach(cb => cb.checked = checked); }
+function filterServerList() {
+    const kw = document.getElementById('server_search').value.toLowerCase();
+    document.querySelectorAll('#server_modal_list .form-check').forEach(div => {
+        const s = allServers.find(x=>x.name===div.dataset.serverName);
+        div.style.display = (div.dataset.serverName.toLowerCase().includes(kw) || (s&&s.ip.toLowerCase().includes(kw))) ? '' : 'none';
+    });
+}
+function confirmServerSelect() {
+    selectedServers = Array.from(document.querySelectorAll('.server-modal-checkbox:checked')).map(cb => cb.value);
+    localStorage.setItem('selected_servers', JSON.stringify(selectedServers));
+    renderSelectedTags();
+    bootstrap.Modal.getInstance(document.getElementById('serverSelectModal')).hide();
+}
+function selectAllDefault() {
+    selectedServers = allServers.map(s=>s.name);
+    localStorage.setItem('selected_servers', JSON.stringify(selectedServers));
+    renderSelectedTags();
+}
+
+// ========== 连通性测试弹窗 ==========
+function openConnTestModal() {
+    // 渲染连通性测试列表（默认全选）
+    connTestServers = allServers.map(s=>s.name);
+    const box = document.getElementById('conn_modal_list');
+    box.innerHTML = '';
+    allServers.forEach(s => {
+        const div = document.createElement('div');
+        div.className = 'form-check'; div.dataset.serverName = s.name;
+        div.innerHTML = `<input class="form-check-input conn-checkbox" type="checkbox" value="${s.name}" checked>
+            <label class="form-check-label"><strong>${s.name}</strong> <small class="text-muted">${s.ip}</small></label>`;
+        box.appendChild(div);
+    });
+    new bootstrap.Modal(document.getElementById('connTestModal')).show();
+}
+function connSelectAll(checked) { document.querySelectorAll('.conn-checkbox').forEach(cb => cb.checked = checked); }
+function filterConnList() {
+    const kw = document.getElementById('conn_search').value.toLowerCase();
+    document.querySelectorAll('#conn_modal_list .form-check').forEach(div => {
+        const s = allServers.find(x=>x.name===div.dataset.serverName);
+        div.style.display = (div.dataset.serverName.toLowerCase().includes(kw) || (s&&s.ip.toLowerCase().includes(kw))) ? '' : 'none';
+    });
+}
+async function runConnTest() {
+    connTestServers = Array.from(document.querySelectorAll('.conn-checkbox:checked')).map(cb => cb.value);
+    bootstrap.Modal.getInstance(document.getElementById('connTestModal')).hide();
+    document.getElementById('conn_log').innerHTML = '';
+    const resp = await fetch('/api/test/connectivity', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({servers: connTestServers}) });
+    const data = await resp.json();
+    startPolling(data.task_id, 'conn_log', null, () => loadServers());
+}
+
+// ========== 扫描 ==========
+async function testMaster() {
+    const data = { ip: document.getElementById('m_ip').value, port: document.getElementById('m_port').value,
+                   user: document.getElementById('m_user').value, password: document.getElementById('m_password').value };
+    const resp = await fetch('/api/test/master', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(data) });
+    alert((await resp.json()).message);
+}
+async function runScan() {
+    document.getElementById('scan_log').innerHTML = '';
+    document.querySelector('#scan_result_table tbody').innerHTML = '';
+    setProgress('scan_progress', 0, 100);
+    document.getElementById('scan_status').textContent = '扫描中...';
+    document.getElementById('scan_status').className = 'text-warning';
+    const resp = await fetch('/api/scan/ansible', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({servers: selectedServers}) });
+    const data = await resp.json();
+    startPolling(data.task_id, 'scan_log', 'scan_progress', async () => {
+        document.getElementById('scan_status').textContent = '扫描完成';
+        document.getElementById('scan_status').className = 'text-success';
+        await refreshScanResults();
+        document.getElementById('btn_collect').disabled = false;
+    });
+}
+async function refreshScanResults() {
+    const resp = await fetch('/api/scan/results');
+    const data = await resp.json();
+    const tbody = document.querySelector('#scan_result_table tbody');
+    tbody.innerHTML = '';
+    data.reports.forEach(r => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${r.server}</td><td>${r.ip}</td><td style="font-size:11px">${r.report_file}</td>
+                       <td><span class="badge ${r.virus_count>0?'badge-virus':'badge-ok'}">${r.virus_count}</span></td>`;
+        tbody.appendChild(tr);
+    });
+}
+
+// ========== 病毒处理 ==========
+async function collectVirus() {
+    document.getElementById('virus_log').innerHTML = '';
+    document.querySelector('#virus_table tbody').innerHTML = '';
+    setProgress('virus_progress', 0, 100);
+    const resp = await fetch('/api/virus/collect', {method:'POST'});
+    const data = await resp.json();
+    startPolling(data.task_id, 'virus_log', 'virus_progress', () => {
+        loadVirusList();
+        document.getElementById('btn_delete').disabled = false;
+        document.getElementById('btn_wl').disabled = false;
+    });
+}
+async function loadVirusList() {
+    const resp = await fetch('/api/virus/list');
+    const data = await resp.json();
+    document.getElementById('virus_count_label').textContent = `共 ${data.count} 个病毒文件`;
+    const tbody = document.querySelector('#virus_table tbody');
+    tbody.innerHTML = '';
+    data.files.forEach((f, idx) => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td class="checkbox-cell"><input type="checkbox" class="virus-check" data-idx="${idx}"></td>
+            <td>${f.server}</td><td style="font-size:11px;word-break:break-all">${f.file_path}</td>
+            <td><span class="badge bg-danger">${f.virus_name}</span></td><td>${f.file_size}</td><td>${f.status}</td>`;
+        tbody.appendChild(tr);
+    });
+}
+function toggleSelectAllVirus() {
+    const c = document.getElementById('select_all_virus').checked;
+    document.querySelectorAll('.virus-check').forEach(cb => cb.checked = c);
+}
+async function markWhitelist() {
+    const checked = document.querySelectorAll('.virus-check:checked');
+    if (checked.length === 0) { alert('请先勾选要标记的文件'); return; }
+    if (!confirm(`将选中的 ${checked.length} 个文件标记为误报？`)) return;
+    const indices = Array.from(checked).map(cb => parseInt(cb.dataset.idx));
+    const resp = await fetch('/api/virus/whitelist', { method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({indices, type: 'path'}) });
+    const result = await resp.json();
+    alert(`已添加 ${result.added} 条白名单`);
+    loadWhitelist();
+}
+async function deleteVirus() {
+    const checked = document.querySelectorAll('.virus-check:checked');
+    if (checked.length === 0) { alert('请先勾选要删除的文件'); return; }
+    if (!confirm(`确定删除选中的 ${checked.length} 个文件？`)) return;
+    const indices = Array.from(checked).map(cb => parseInt(cb.dataset.idx));
+    const resp = await fetch('/api/virus/delete', { method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({indices}) });
+    const data = await resp.json();
+    startPolling(data.task_id, 'virus_log', 'virus_progress', () => loadVirusList());
+}
+
+// ========== 白名单 ==========
+async function loadWhitelist() {
+    const resp = await fetch('/api/virus/whitelist');
+    const data = await resp.json();
+    const tbody = document.querySelector('#whitelist_table tbody');
+    tbody.innerHTML = '';
+    data.whitelist.forEach((item, idx) => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${item.type==='path'?'文件路径':'病毒名称'}</td>
+            <td style="font-size:12px;word-break:break-all">${item.pattern}</td>
+            <td style="font-size:12px">${item.add_time||'-'}</td>
+            <td><button class="btn btn-outline-danger btn-sm" onclick="delWhitelist(${idx})"><i class="bi bi-trash"></i></button></td>`;
+        tbody.appendChild(tr);
+    });
+}
+async function delWhitelist(idx) {
+    if (!confirm('确定删除？')) return;
+    await fetch('/api/virus/whitelist/' + idx, {method:'DELETE'});
+    loadWhitelist();
+}
+
+// ========== 历史记录（详细） ==========
+async function loadHistory() {
+    const resp = await fetch('/api/history');
+    const data = await resp.json();
+    const box = document.getElementById('history_list');
+    box.innerHTML = '';
+    if (data.history.length === 0) { box.innerHTML = '<div class="text-muted">暂无历史记录</div>'; return; }
+    data.history.forEach(h => {
+        const hasVirus = h.virus_servers.length > 0;
+        const div = document.createElement('div');
+        div.className = 'history-item ' + (hasVirus ? 'has-virus' : 'clean');
+        // 详细列出每台服务器的结果
+        let detailHtml = '<div class="mt-2" style="font-size:12px;">';
+        if (h.reports) {
+            for (const [s, r] of Object.entries(h.reports)) {
+                const cls = r.virus_count > 0 ? 'text-danger fw-bold' : 'text-success';
+                detailHtml += `<span class="${cls}" style="margin-right:15px;">${s} (${r.ip}): ${r.virus_count}个</span>`;
+            }
+        }
+        detailHtml += '</div>';
+        div.innerHTML = `<div class="d-flex justify-content-between">
+            <strong>${h.time} ${h.from_schedule?'<span class="badge bg-secondary">定时</span>':''}</strong>
+            <span class="badge ${hasVirus?'badge-virus':'badge-ok'}">${h.virus_total}个病毒 / ${h.servers_scanned}台</span>
+        </div>${detailHtml}`;
+        box.appendChild(div);
+    });
+}
+
+// ========== 定时任务 ==========
+async function loadSchedule() {
+    const resp = await fetch('/api/schedule');
+    const data = await resp.json();
+    document.getElementById('sched_enabled').checked = data.schedule.enabled;
+    document.getElementById('sched_cron').value = data.schedule.cron;
+    document.getElementById('sched_webhook').value = data.schedule.webhook;
+}
+async function saveSchedule() {
+    const data = { enabled: document.getElementById('sched_enabled').checked,
+                   cron: document.getElementById('sched_cron').value,
+                   webhook: document.getElementById('sched_webhook').value };
+    await fetch('/api/schedule', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(data) });
+    alert('定时配置已保存');
+}
+async function testPush() {
+    const webhook = document.getElementById('sched_webhook').value;
+    const resp = await fetch('/api/schedule/test-push', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({webhook}) });
+    alert((await resp.json()).message);
+}
+
+// ========== 服务器配置 ==========
+async function loadServers() {
+    const resp = await fetch('/api/config/servers');
+    const data = await resp.json();
+    const tbody = document.querySelector('#server_table tbody');
+    tbody.innerHTML = '';
+    data.servers.forEach(s => {
+        const tr = document.createElement('tr');
+        const c = s.connectivity.includes('连通') ? 'text-success' : (s.connectivity.includes('失败') ? 'text-danger' : 'text-muted');
+        tr.innerHTML = `<td>${s.name}</td><td>${s.ip}</td><td>${s.user}</td><td>${s.port}</td><td>${s.auth_type}</td><td class="${c}">${s.connectivity}</td>`;
+        tbody.appendChild(tr);
+    });
+}
+async function reloadConfig() {
+    const resp = await fetch('/api/config/reload', {method:'POST'});
+    const result = await resp.json();
+    alert(`已重新加载 ${result.count} 台`);
+    loadServers(); loadServerList(); loadMasterConfig(); loadSchedule();
+}
+async function saveConfig() {
+    if (!confirm('密码将以明文保存，确认？')) return;
+    alert((await (await fetch('/api/config/save', {method:'POST'})).json()).message);
+}
+
+// ========== ClamAV（支持选目标） ==========
+async function checkClamav() {
+    document.getElementById('clamav_log').innerHTML = '';
+    document.getElementById('clamav_info').style.display = 'none';
+    const target = document.getElementById('clamav_target').value;
+    const resp = await fetch('/api/clamav/status', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({server: target}) });
+    const data = await resp.json();
+    startPolling(data.task_id, 'clamav_log', null, (result) => {
+        if (result && !result.error) {
+            document.getElementById('ci_target').textContent = result.target || '-';
+            document.getElementById('ci_version').textContent = result.version || '-';
+            document.getElementById('ci_date').textContent = result.db_date || '-';
+            document.getElementById('ci_files').textContent = result.db_files || '-';
+            document.getElementById('clamav_info').style.display = 'block';
+        }
+    });
+}
+async function updateClamav() {
+    const target = document.getElementById('clamav_target').value;
+    const label = target ? `服务器 ${target}` : '主控136';
+    if (!confirm(`确认在${label}执行 freshclam 更新病毒库？`)) return;
+    document.getElementById('clamav_log').innerHTML = '';
+    const resp = await fetch('/api/clamav/update', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({server: target}) });
+    const data = await resp.json();
+    startPolling(data.task_id, 'clamav_log', null, (result) => {
+        if (result && !result.error) {
+            document.getElementById('ci_target').textContent = result.target || '-';
+            document.getElementById('ci_date').textContent = result.db_date || '-';
+            document.getElementById('ci_files').textContent = result.db_files || '-';
+            document.getElementById('clamav_info').style.display = 'block';
+        }
+    });
+}
+
+// 初始化
+loadMasterConfig();
+loadServers();
+loadServerList();
+loadHistory();
+loadWhitelist();
+loadSchedule();
+</script>
+</body>
+</html>
