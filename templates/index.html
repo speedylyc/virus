@@ -25,6 +25,9 @@
         .history-item.clean { border-left-color: #198754; }
         .selected-servers-tag { display: inline-block; background: #cfe2ff; border: 1px solid #9ec5fe;
                                 border-radius: 4px; padding: 2px 8px; margin: 2px; font-size: 12px; }
+        .op-item { border-left: 3px solid #6c757d; background: #fff; padding: 8px 12px; margin-bottom: 6px;
+                   border-radius: 0 4px 4px 0; font-size: 13px; font-family: Consolas, monospace; }
+        .op-item.del { border-left-color: #dc3545; } .op-item.wl { border-left-color: #fd7e14; }
     </style>
 </head>
 <body>
@@ -36,6 +39,7 @@
         <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#virus"><i class="bi bi-bug"></i> 病毒处理</button></li>
         <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#whitelist"><i class="bi bi-check2-circle"></i> 白名单</button></li>
         <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#history"><i class="bi bi-clock-history"></i> 历史记录</button></li>
+        <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#oplog"><i class="bi bi-journal-text"></i> 处理记录</button></li>
         <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#schedule"><i class="bi bi-calendar-clock"></i> 定时任务</button></li>
         <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#servers"><i class="bi bi-hdd-network"></i> 服务器配置</button></li>
         <li class="nav-item"><button class="nav-link" data-bs-toggle="tab" data-bs-target="#clamav"><i class="bi bi-shield"></i> ClamAV管理</button></li>
@@ -121,6 +125,16 @@
             <div class="card"><div class="card-header"><i class="bi bi-clock-history"></i> 扫描历史记录
                 <div class="float-end"><button class="btn btn-outline-primary btn-sm" onclick="loadHistory()"><i class="bi bi-arrow-clockwise"></i> 刷新</button></div>
             </div><div class="card-body" id="history_list"></div></div>
+        </div>
+
+        <!-- ========== 处理记录 ========== -->
+        <div class="tab-pane fade" id="oplog">
+            <div class="card"><div class="card-header"><i class="bi bi-journal-text"></i> 处理记录
+                <div class="float-end"><button class="btn btn-outline-primary btn-sm" onclick="loadOpLog()"><i class="bi bi-arrow-clockwise"></i> 刷新</button></div>
+            </div><div class="card-body">
+                <div class="alert alert-info py-2"><small><i class="bi bi-info-circle"></i> 在历史记录里点击某条记录的【处理记录】按钮，可查看该次扫描对应的删除 / 标记误报操作。</small></div>
+                <div id="oplog_list"></div>
+            </div></div>
         </div>
 
         <!-- ========== 定时任务 ========== -->
@@ -545,6 +559,50 @@ async function refreshScanResults() {
 }
 
 // ========== 病毒处理 ==========
+let oplogCurrentIdx = null;  // 处理记录页当前查看的历史记录索引
+async function viewHistoryOps(idx) {
+    oplogCurrentIdx = idx;
+    document.querySelector('[data-bs-target="#oplog"]').click();
+    await loadOpLog();
+}
+async function loadOpLog() {
+    const box = document.getElementById('oplog_list');
+    if (oplogCurrentIdx === null) {
+        box.innerHTML = '<div class="text-muted">请先在历史记录里点击某条记录的【处理记录】按钮查看对应操作。</div>';
+        return;
+    }
+    const resp = await fetch('/api/history/' + oplogCurrentIdx + '/operations');
+    const data = await resp.json();
+    if (!data.success) { box.innerHTML = '<div class="text-muted">' + escapeHtml(data.message || '加载失败') + '</div>'; return; }
+    let head = data.time ? '<div class="mb-2 text-muted" style="font-size:12px">扫描时间：' + escapeHtml(data.time) + '</div>' : '';
+    if (data.operations.length === 0) {
+        box.innerHTML = head + '<div class="text-muted">该次扫描暂无处理记录（未执行删除 / 标记误报，或为本功能上线前的记录）。</div>';
+        return;
+    }
+    let html = head;
+    data.operations.forEach(op => {
+        const cls = op.includes('删除') ? 'op-item del' : 'op-item wl';
+        html += '<div class="' + cls + '">' + escapeHtml(op) + '</div>';
+    });
+    box.innerHTML = html;
+}
+async function viewHistoryResult(idx) {
+    // 从历史记录跳到病毒处理页，载入该条记录（定时任务）的扫描结果文件
+    document.querySelector('[data-bs-target="#virus"]').click();
+    document.getElementById('virus_log').innerHTML = '';
+    document.querySelector('#virus_table tbody').innerHTML = '';
+    setProgress('virus_progress', 0, 100);
+    // 保持"1.扫描结果"可点：载入历史结果后仍可重新收集
+    document.getElementById('btn_collect').disabled = false;
+    const resp = await fetch('/api/history/' + idx + '/load', {method:'POST'});
+    const data = await resp.json();
+    if (!data.task_id) { addLog('virus_log', data.message || '载入失败', 'error'); return; }
+    startPolling(data.task_id, 'virus_log', 'virus_progress', () => {
+        loadVirusList();
+        document.getElementById('btn_delete').disabled = false;
+        document.getElementById('btn_wl').disabled = false;
+    });
+}
 async function collectVirus() {
     document.getElementById('virus_log').innerHTML = '';
     document.querySelector('#virus_table tbody').innerHTML = '';
@@ -625,7 +683,7 @@ async function loadHistory() {
     const box = document.getElementById('history_list');
     box.innerHTML = '';
     if (data.history.length === 0) { box.innerHTML = '<div class="text-muted">暂无历史记录</div>'; return; }
-    data.history.forEach(h => {
+    data.history.forEach((h, idx) => {
         const hasVirus = h.virus_servers.length > 0;
         const div = document.createElement('div');
         div.className = 'history-item ' + (hasVirus ? 'has-virus' : 'clean');
@@ -638,9 +696,17 @@ async function loadHistory() {
             }
         }
         detailHtml += '</div>';
-        div.innerHTML = `<div class="d-flex justify-content-between">
+        div.innerHTML = `<div class="d-flex justify-content-between align-items-center flex-wrap gap-2">
             <strong>${h.time} ${h.from_schedule?'<span class="badge bg-secondary">定时</span>':''}</strong>
-            <span class="badge ${hasVirus?'badge-virus':'badge-ok'}">${h.virus_total}个病毒 / ${h.servers_scanned}台</span>
+            <span class="d-flex align-items-center gap-2">
+                <button class="btn btn-outline-primary btn-sm" onclick="viewHistoryResult(${idx})" title="跳到病毒处理页并载入本次扫描的结果文件">
+                    <i class="bi bi-bug"></i> 扫描结果
+                </button>
+                <button class="btn btn-outline-secondary btn-sm" onclick="viewHistoryOps(${idx})" title="查看本次扫描对应的处理操作记录">
+                    <i class="bi bi-journal-text"></i> 处理记录
+                </button>
+                <span class="badge ${hasVirus?'badge-virus':'badge-ok'}">${h.virus_total}个病毒 / ${h.servers_scanned}台</span>
+            </span>
         </div>${detailHtml}`;
         box.appendChild(div);
     });

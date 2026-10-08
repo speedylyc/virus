@@ -14,11 +14,14 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_FILE = os.path.join(BASE_DIR, 'servers_config.json')
 HISTORY_FILE = os.path.join(BASE_DIR, 'scan_history.json')
 WHITELIST_FILE = os.path.join(BASE_DIR, 'whitelist.json')
+OPERATION_LOG = os.path.join(BASE_DIR, 'virus_operation.log')
+_operation_lock = threading.Lock()
 
 state = {
     'servers_config': {}, 'scan_reports': {}, 'all_virus_files': [],
     'tasks': {}, 'clamav_info': {}, 'whitelist': [],
     'scan_stop': False, 'current_scan_task': None,
+    'active_history_idx': None,
     'schedule': {'enabled':False,'cron':'0 9 * * 1','schedule_servers':[],'webhook':'https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=7e116515-d60f-42cd-8d9d-6c0bd608def4'}
 }
 
@@ -44,6 +47,29 @@ def load_whitelist():
 
 def save_whitelist():
     with open(WHITELIST_FILE,'w',encoding='utf-8') as f: json.dump(state['whitelist'], f, indent=2, ensure_ascii=False)
+
+def append_operation_log(msg):
+    """把病毒处理操作（删除/标记误报等）追加写入本地持久日志文件，并关联到当前活跃的历史记录。"""
+    ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    # 1) 写入全局流水文件
+    try:
+        with _operation_lock:
+            with open(OPERATION_LOG, 'a', encoding='utf-8') as f:
+                f.write(f"[{ts}] {msg}\n")
+    except Exception as e:
+        print(f"[操作日志] 写入失败: {e}")
+    # 2) 关联到当前活跃的历史记录（可回看）
+    aidx = state.get('active_history_idx')
+    if aidx is not None:
+        try:
+            history = load_history()
+            if 0 <= aidx < len(history):
+                entry = history[aidx]
+                entry.setdefault('operation_log', [])
+                entry['operation_log'].append(f"[{ts}] {msg}")
+                save_history(history)
+        except Exception as e:
+            print(f"[操作日志] 关联历史失败: {e}")
 
 def load_history():
     if not os.path.exists(HISTORY_FILE): return []
@@ -353,6 +379,8 @@ def do_scan(selected_servers=None, from_schedule=False):
                   'from_schedule':from_schedule,'stopped':stopped,
                   'reports':{s:{'ip':ii['full_ip'],'virus_count':ii.get('virus_count',0),'report_file':ii.get('report_file',''),'status':ii.get('status','')} for s,ii in state['scan_reports'].items()}}
         history.insert(0, record); history = history[:100]; save_history(history)
+        # 本次扫描结果对应的历史记录（处理操作将关联到它）
+        state['active_history_idx'] = 0
         if vservers:
             msg = f"🚨 病毒扫描告警{status_text}\n时间: {record['time']}\n扫描 {len(state['scan_reports'])} 台\n发现病毒 {len(vservers)} 台:\n"
             for s in vservers:
@@ -382,6 +410,52 @@ def scan_results():
     return jsonify({'reports':[{'server':s,'ip':i['full_ip'],'report_file':i['report_file'],'virus_count':i['virus_count'],'status':i.get('status','')} for s,i in state['scan_reports'].items()]})
 
 # ========== 病毒文件收集 ==========
+def gather_virus_files(server_names, log_fn=None, progress_fn=None):
+    """从 state['scan_reports'] 中各服务器的报告文件，把病毒文件收集到 state['all_virus_files']。
+    log_fn(msg, level) / progress_fn(i, total) 为可选回调。返回白名单过滤掉的误报数量。"""
+    state['all_virus_files'] = []
+    filtered = 0
+    total = len(server_names)
+    for i, server in enumerate(server_names):
+        info = state['servers_config'].get(server)
+        if not info:
+            if log_fn: log_fn(f"{server}: 配置不存在，跳过", 'error')
+            if progress_fn: progress_fn(i+1, total)
+            continue
+        rpt = state['scan_reports'].get(server, {}).get('report_file', '')
+        if log_fn: log_fn(f"收集 {server} ({info.get('ip','')})...", 'info')
+        ssh, err = create_ssh(server)
+        if not ssh:
+            if log_fn: log_fn(f"{server}: 连接失败 - {err}", 'error')
+            if progress_fn: progress_fn(i+1, total)
+            continue
+        try:
+            rdir = get_clamav_paths(server)['report_dir']
+            si = ssh.exec_command(f"grep 'FOUND$' {rdir}/{rpt}")
+            content = si[1].read().decode().strip()
+            cnt = 0
+            for line in content.split('\n'):
+                if not line or 'FOUND' not in line: continue
+                if ': ' in line:
+                    pos = line.find(': '); fp = line[:pos].strip()
+                    vn = line[pos+2:].strip().replace(' FOUND','').strip()
+                else:
+                    parts = line.split(); fp = parts[0] if parts else line; vn = "未知"
+                if is_whitelisted(fp, vn): filtered += 1; continue
+                sz = ssh.exec_command(f"ls -lh '{fp}' 2>/dev/null | awk '{{print $5}}'")
+                fs = sz[1].read().decode().strip()
+                state['all_virus_files'].append({'server':server,'ip':info.get('ip',''),'file_path':fp,'virus_name':vn,'file_size':fs or '未知','status':'待删除'})
+                cnt += 1
+            if log_fn: log_fn(f"{server}: {cnt} 个病毒文件", 'error' if cnt>0 else 'success')
+        except Exception as e:
+            if log_fn: log_fn(f"{server}: 失败 - {e}", 'error')
+        finally:
+            ssh.close()
+        if progress_fn: progress_fn(i+1, total)
+    if filtered > 0 and log_fn:
+        log_fn(f"白名单过滤掉 {filtered} 个误报", 'info')
+    return filtered
+
 @app.route('/api/virus/collect', methods=['POST'])
 def collect_virus():
     tid = new_task('收集病毒文件')
@@ -392,35 +466,9 @@ def collect_virus():
     valid = [s for s in vservers if state['servers_config'].get(s,{}).get('password') or state['servers_config'].get(s,{}).get('key_path')]
     def run():
         update_progress(tid, total=len(valid), progress=0)
-        filtered = 0
-        for i, server in enumerate(valid):
-            info = state['servers_config'][server]
-            rpt = state['scan_reports'][server]['report_file']
-            add_log(tid, f"收集 {server} ({info['ip']})...")
-            ssh, err = create_ssh(server)
-            if not ssh:
-                add_log(tid, f"{server}: 连接失败 - {err}", 'error'); update_progress(tid, progress=i+1); continue
-            try:
-                rdir = get_clamav_paths(server)['report_dir']
-                si = ssh.exec_command(f"grep 'FOUND$' {rdir}/{rpt}")
-                content = si[1].read().decode().strip()
-                for line in content.split('\n'):
-                    if not line or 'FOUND' not in line: continue
-                    if ': ' in line:
-                        pos = line.find(': '); fp = line[:pos].strip()
-                        vn = line[pos+2:].strip().replace(' FOUND','').strip()
-                    else:
-                        parts = line.split(); fp = parts[0] if parts else line; vn = "未知"
-                    if is_whitelisted(fp, vn): filtered += 1; continue
-                    sz = ssh.exec_command(f"ls -lh '{fp}' 2>/dev/null | awk '{{print $5}}'")
-                    fs = sz[1].read().decode().strip()
-                    state['all_virus_files'].append({'server':server,'ip':info['ip'],'file_path':fp,'virus_name':vn,'file_size':fs or '未知','status':'待删除'})
-                cnt = len([f for f in state['all_virus_files'] if f['server']==server])
-                add_log(tid, f"{server}: {cnt} 个病毒文件", 'error' if cnt>0 else 'success')
-            except Exception as e: add_log(tid, f"{server}: 失败 - {e}", 'error')
-            finally: ssh.close()
-            update_progress(tid, progress=i+1)
-        if filtered>0: add_log(tid, f"白名单过滤掉 {filtered} 个误报")
+        gather_virus_files(valid,
+                           log_fn=lambda msg, level: add_log(tid, msg, level),
+                           progress_fn=lambda i, total: update_progress(tid, progress=i))
         add_log(tid, f"共 {len(state['all_virus_files'])} 个病毒文件", 'success')
         finish_task(tid, {'count':len(state['all_virus_files'])})
     threading.Thread(target=run, daemon=True).start()
@@ -440,6 +488,7 @@ def add_whitelist():
             if not any(i.get('pattern')==pattern for i in state['whitelist']):
                 state['whitelist'].append({'type':wl_type,'pattern':pattern,'add_time':datetime.now().strftime('%Y-%m-%d %H:%M:%S')})
                 added += 1
+                append_operation_log(f"标记误报 服务器 {vf['server']} - {pattern}（{'文件路径' if wl_type=='path' else '病毒名称'}）")
     save_whitelist()
     return jsonify({'success':True,'added':added,'total':len(state['whitelist'])})
 
@@ -463,12 +512,17 @@ def delete_virus():
         for i, vf in enumerate(targets):
             add_log(tid, f"删除: {vf['server']} - {vf['file_path']} ({vf['virus_name']})")
             ssh, err = create_ssh(vf['server'])
-            if not ssh: add_log(tid, f"失败: {err}", 'error'); fail += 1
+            if not ssh:
+                add_log(tid, f"失败: {err}", 'error'); fail += 1
+                append_operation_log(f"删除失败 服务器 {vf['server']} - {vf['file_path']} ({vf['virus_name']})：连接失败 {err}")
             else:
                 try:
                     ssh.exec_command(f"rm -f '{vf['file_path']}'"); vf['status']='已删除'; ok += 1
                     add_log(tid, f"✅ 已删除: {vf['file_path']}", 'success')
-                except Exception as e: add_log(tid, f"失败: {e}", 'error'); fail += 1
+                    append_operation_log(f"删除成功 服务器 {vf['server']} - {vf['file_path']} ({vf['virus_name']})")
+                except Exception as e:
+                    add_log(tid, f"失败: {e}", 'error'); fail += 1
+                    append_operation_log(f"删除失败 服务器 {vf['server']} - {vf['file_path']} ({vf['virus_name']})：{e}")
                 finally: ssh.close()
             update_progress(tid, progress=i+1)
         state['all_virus_files'] = [f for f in state['all_virus_files'] if f['status']!='已删除']
@@ -553,6 +607,53 @@ def clamav_update():
 @app.route('/api/history', methods=['GET'])
 def get_history():
     return jsonify({'history':load_history()})
+
+@app.route('/api/history/<int:idx>/load', methods=['POST'])
+def history_load(idx):
+    """把某条历史记录（通常是定时任务）的扫描结果文件载入内存，供病毒处理页使用。
+    按该记录中各服务器的 report_file，SSH 到目标机读取 FOUND 行，填充病毒文件列表。"""
+    history = load_history()
+    if idx < 0 or idx >= len(history):
+        return jsonify({'success':False,'message':'历史记录不存在'}),404
+    record = history[idx]
+    reports = record.get('reports') or {}
+    # 用该历史记录的扫描结果覆盖当前扫描结果，后续病毒处理逻辑都基于它
+    state['scan_reports'] = {}
+    for server, r in reports.items():
+        state['scan_reports'][server] = {
+            'full_ip': r.get('ip',''),
+            'virus_count': r.get('virus_count',0),
+            'report_file': r.get('report_file',''),
+            'status': r.get('status','')
+        }
+    vservers = [s for s,i in state['scan_reports'].items() if i.get('virus_count',0)>0 and i.get('report_file')]
+    valid = [s for s in vservers if state['servers_config'].get(s,{}).get('password') or state['servers_config'].get(s,{}).get('key_path')]
+    tid = new_task('载入历史扫描结果')
+    # 之后在此记录上的处理操作将关联到这条历史记录
+    state['active_history_idx'] = idx
+    def run():
+        if not valid:
+            state['all_virus_files'] = []
+            add_log(tid, "该记录无病毒报告文件可收集（可能无病毒，或服务器无认证配置）", 'info')
+            update_progress(tid, progress=100)
+        else:
+            update_progress(tid, total=len(valid), progress=0)
+            gather_virus_files(valid,
+                               log_fn=lambda msg, level: add_log(tid, msg, level),
+                               progress_fn=lambda i, total: update_progress(tid, progress=i))
+        add_log(tid, f"已载入历史扫描结果，共 {len(state['all_virus_files'])} 个病毒文件", 'success')
+        finish_task(tid, {'count':len(state['all_virus_files']), 'servers':list(reports.keys())})
+    threading.Thread(target=run, daemon=True).start()
+    return jsonify({'task_id':tid})
+
+@app.route('/api/history/<int:idx>/operations', methods=['GET'])
+def history_operations(idx):
+    """返回某条历史记录对应的处理操作日志（删除/标记误报等）。"""
+    history = load_history()
+    if idx < 0 or idx >= len(history):
+        return jsonify({'success':False,'message':'历史记录不存在'}),404
+    ops = history[idx].get('operation_log', [])
+    return jsonify({'success':True,'operations':ops,'time':history[idx].get('time','')})
 
 # ========== 定时任务 ==========
 @app.route('/api/schedule', methods=['GET'])
